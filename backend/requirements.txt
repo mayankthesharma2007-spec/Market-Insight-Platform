@@ -8,3 +8,4 @@ yfinance
 feedparser
 google-genai
 pydantic
+certifi

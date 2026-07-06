@@ -1,4 +1,5 @@
 import os
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
@@ -6,7 +7,7 @@ load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/market_insight")
 
-client = AsyncIOMotorClient(MONGO_URI)
+client = AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
 db = client.get_default_database("market_insight")
 
 # Collections
