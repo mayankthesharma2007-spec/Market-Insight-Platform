@@ -1,4 +1,4 @@
-export const API_BASE = "http://localhost:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 /** Get JWT token from localStorage (safe for SSR guard). */
 export function getToken(): string | null {
