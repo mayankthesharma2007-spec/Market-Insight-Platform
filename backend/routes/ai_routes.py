@@ -2,7 +2,6 @@ import os
 import json
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, status
-import yfinance as yf
 from google import genai
 from dotenv import load_dotenv
 
@@ -13,7 +12,6 @@ load_dotenv()
 
 router = APIRouter(prefix="/ai", tags=["AI Insights"])
 
-# Configure Gemini client
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 ai_cache_collection = db["ai_cache"]
@@ -31,8 +29,8 @@ def _ensure_nse_suffix(symbol: str) -> str:
 async def get_ai_insight(request: AIInsightRequest):
     """
     Generate AI-powered stock insight using Gemini.
-    Fetches recent price data via yfinance, then sends a structured prompt
-    to Gemini asking for trend, risks, and key observations.
+    Reuses cached/seeded stock price data (from the /stock endpoint's cache)
+    instead of calling yfinance directly, avoiding Render's IP rate limiting.
     Results are cached in MongoDB for 3 hours to reduce Gemini API usage.
     """
     try:
@@ -44,7 +42,7 @@ async def get_ai_insight(request: AIInsightRequest):
 
         ticker_symbol = _ensure_nse_suffix(request.symbol)
 
-        # ── Cache check ───────────────────────────────────────────────────────
+        # ── Insight cache check ──────────────────────────────────────────────
         now_utc = datetime.now(timezone.utc)
         cache_cutoff = now_utc - timedelta(hours=CACHE_TTL_HOURS)
         cached_doc = await ai_cache_collection.find_one(
@@ -61,43 +59,33 @@ async def get_ai_insight(request: AIInsightRequest):
             )
         # ─────────────────────────────────────────────────────────────────────
 
-        ticker = yf.Ticker(ticker_symbol)
-
-        # Fetch recent price history (last 30 days)
-        hist = ticker.history(period="1mo")
-        if hist.empty:
+        # ── Get underlying stock data from the stock cache (populated by
+        #    /stock/{symbol} or the seed script) instead of calling yfinance ──
+        stock_doc = await ai_cache_collection.find_one(
+            {"symbol": ticker_symbol, "type": "stock"}
+        )
+        if not stock_doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No historical data found for {ticker_symbol}",
+                detail=(
+                    f"No price data available yet for {ticker_symbol}. "
+                    "Please view the stock's price details first, then try AI insight again."
+                ),
             )
+        stock_data = stock_doc["data"]
+        # ─────────────────────────────────────────────────────────────────────
 
-        # Build price summary for the prompt
-        recent_data = hist.tail(10)
-        price_summary = []
-        for date, row in recent_data.iterrows():
-            price_summary.append(
-                f"Date: {date.strftime('%Y-%m-%d')}, "
-                f"Open: {row['Open']:.2f}, High: {row['High']:.2f}, "
-                f"Low: {row['Low']:.2f}, Close: {row['Close']:.2f}, "
-                f"Volume: {int(row['Volume'])}"
-            )
+        prompt = f"""You are a financial analyst. Analyze the following stock data for {ticker_symbol} and provide insights.
 
-        price_text = "\n".join(price_summary)
-        info = ticker.info
-        company_name = info.get("shortName", ticker_symbol)
-
-        prompt = f"""You are a financial analyst. Analyze the following recent stock data for {company_name} ({ticker_symbol}) and provide insights.
-
-Recent Price Data (last 10 trading days):
-{price_text}
-
-Current Price: {info.get('regularMarketPrice', 'N/A')}
-52-Week High: {info.get('fiftyTwoWeekHigh', 'N/A')}
-52-Week Low: {info.get('fiftyTwoWeekLow', 'N/A')}
+Current Price: {stock_data.get('current_price', 'N/A')}
+Daily Change: {stock_data.get('daily_change_percent', 'N/A')}%
+52-Week High: {stock_data.get('week_52_high', 'N/A')}
+52-Week Low: {stock_data.get('week_52_low', 'N/A')}
+Volume: {stock_data.get('volume', 'N/A')}
 
 Respond ONLY with a valid JSON object containing exactly these three keys:
-- "trend": A concise paragraph describing the recent price trend and momentum
-- "risks": A concise paragraph describing potential risks and concerns
+- "trend": A concise paragraph describing the likely recent price trend and momentum, based on where the current price sits relative to its 52-week range and today's change
+- "risks": A concise paragraph describing potential risks and concerns based on this data
 - "observations": A concise paragraph with key observations and notable patterns
 
 Do NOT include any text outside the JSON object. Do NOT use markdown formatting."""
@@ -108,13 +96,9 @@ Do NOT include any text outside the JSON object. Do NOT use markdown formatting.
             contents=prompt,
         )
 
-        # Parse the response
         response_text = response.text.strip()
-
-        # Remove markdown code fences if present
         if response_text.startswith("```"):
             lines = response_text.split("\n")
-            # Remove first and last lines (``` markers)
             lines = [l for l in lines if not l.strip().startswith("```")]
             response_text = "\n".join(lines)
 
@@ -126,18 +110,16 @@ Do NOT include any text outside the JSON object. Do NOT use markdown formatting.
             "observations": insight_data.get("observations", "No observations available"),
         }
 
-        # ── Upsert into cache ─────────────────────────────────────────────────
         await ai_cache_collection.update_one(
             {"symbol": ticker_symbol, "type": "insight"},
             {"$set": {
                 "symbol": ticker_symbol,
                 "type": "insight",
                 "data": result_payload,
-                "cached_at": now_utc.replace(tzinfo=None),  # store as naive UTC
+                "cached_at": now_utc.replace(tzinfo=None),
             }},
             upsert=True,
         )
-        # ─────────────────────────────────────────────────────────────────────
 
         return AIInsightResponse(
             symbol=ticker_symbol,

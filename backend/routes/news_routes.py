@@ -54,7 +54,7 @@ async def get_news_with_sentiment(symbol: str):
         # ─────────────────────────────────────────────────────────────────────
 
         # Fetch headlines from Google News RSS
-        query = quote(f"{symbol_upper} stock NSE India")
+        query = quote(f"{symbol_upper} share price")
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
         feed = feedparser.parse(rss_url)
 
