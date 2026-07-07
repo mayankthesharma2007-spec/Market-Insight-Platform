@@ -53,16 +53,31 @@ async def get_news_with_sentiment(symbol: str):
             return NewsResponse(symbol=symbol_upper, results=results, cached=True)
         # ─────────────────────────────────────────────────────────────────────
 
-        # Fetch headlines from Google News RSS
-        query = quote(f"{symbol_upper} share price")
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
-        feed = feedparser.parse(rss_url)
+        # Fetch headlines from Google News RSS — try a couple of query
+        # variations since some stocks have sparse direct coverage
+        feed = None
+        for q in [f"{symbol_upper} share price", f"{symbol_upper} stock", symbol_upper]:
+            query = quote(q)
+            rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
+            attempt = feedparser.parse(rss_url)
+            if attempt.entries:
+                feed = attempt
+                break
 
-        if not feed.entries:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No news found for symbol: {symbol_upper}",
+        if not feed or not feed.entries:
+            # Gracefully return an empty list instead of erroring out —
+            # some stocks genuinely have little recent news coverage
+            await news_cache_collection.update_one(
+                {"symbol": symbol_upper, "type": "news"},
+                {"$set": {
+                    "symbol": symbol_upper,
+                    "type": "news",
+                    "data": [],
+                    "cached_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                }},
+                upsert=True,
             )
+            return NewsResponse(symbol=symbol_upper, results=[], cached=False)
 
         # Take top 5 headlines
         headlines = [entry.title for entry in feed.entries[:5]]
